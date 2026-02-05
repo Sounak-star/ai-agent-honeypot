@@ -408,6 +408,10 @@ async def handle_message(event: MessageEvent, x_api_key: Optional[str] = Header(
 
     return response
 
+@app.post("/")
+async def root_entry(event: MessageEvent, x_api_key: Optional[str] = Header(None)):
+    return await handle_message(event, x_api_key)
+
 
 if __name__ == "__main__":
     import uvicorn
