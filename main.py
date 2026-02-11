@@ -9,9 +9,6 @@ from typing import Dict, List, Optional, Union, Literal
 import requests
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
-from dotenv import load_dotenv
-
-load_dotenv()
 
 APP_NAME = "Agentic Honey-Pot"
 
