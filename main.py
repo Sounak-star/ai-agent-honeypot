@@ -79,9 +79,7 @@ KEYWORD_WEIGHTS = {
 
 URL_PATTERN = re.compile(r"(https?://\S+|www\.\S+)", re.IGNORECASE)
 UPI_URL_PARAM = re.compile(r"(?i)[?&]pa=([a-z0-9.\-_]+@[a-z0-9]+)")
-UPI_PATTERN = re.compile(
-    r"(?i)\b[a-z0-9.\-_]{2,}@(upi|ybl|ibl|okaxis|oksbi|okicici|paytm|phonepe|axl|apl)\b"
-)
+UPI_PATTERN = re.compile(r"(?i)\b[a-z0-9.\-_]{2,}@[a-z0-9]{2,}\b")
 PHONE_PATTERN = re.compile(r"\b(?:\+?\d{1,3}[\s-]?)?(?:\d{10})\b")
 BANK_PATTERN = re.compile(r"\b\d{9,18}\b")
 IFSC_PATTERN = re.compile(r"\b[A-Z]{4}0[0-9A-Z]{6}\b")
@@ -403,27 +401,19 @@ def extract_intelligence(texts: List[str], intel: Intelligence) -> None:
     for match in UPI_URL_PARAM.findall(combined):
         intel.upi_ids.add(match.lower())
 
-    upi_suffixes = {
-        "upi",
-        "ybl",
-        "ibl",
-        "okaxis",
-        "oksbi",
-        "okicici",
-        "paytm",
-        "phonepe",
-        "axl",
-        "apl",
-    }
-    for match in re.findall(r"(?i)\b[a-z0-9.\-_]{2,}@[a-z0-9]+\b", combined):
-        suffix = match.split("@", 1)[1].lower()
-        if suffix in upi_suffixes:
-            intel.upi_ids.add(match.lower())
+    for match in UPI_PATTERN.findall(combined):
+        intel.upi_ids.add(match.lower())
 
+    phone_digits = set()
     for match in PHONE_PATTERN.findall(combined):
-        intel.phone_numbers.add(_normalize_phone(match))
+        normalized = _normalize_phone(match)
+        intel.phone_numbers.add(normalized)
+        phone_digits.add(re.sub(r"\D", "", normalized))
 
     for match in BANK_PATTERN.findall(combined):
+        # Prevent phone numbers from being misclassified as bank accounts.
+        if any(digits.endswith(match) for digits in phone_digits):
+            continue
         intel.bank_accounts.add(match)
 
     for match in IFSC_PATTERN.findall(combined):
@@ -581,8 +571,23 @@ def generate_with_gemini(messages: List[Dict[str, str]]) -> Optional[str]:
         return None
 
 
+def _last_agent_reply(state: SessionState) -> str:
+    for entry in reversed(state.transcript):
+        if entry.sender == "user":
+            return entry.text.strip()
+    return ""
+
+
+def _pick_non_repeating(candidates: List[str], last_reply: str) -> str:
+    for candidate in candidates:
+        if candidate != last_reply:
+            return candidate
+    return random.choice(candidates)
+
+
 def generate_rule_based_reply(state: SessionState) -> str:
     missing = _missing_intel_targets(state.intel)
+    last_reply = _last_agent_reply(state)
 
     if state.agent_turns == 0:
         return (
@@ -592,16 +597,40 @@ def generate_rule_based_reply(state: SessionState) -> str:
 
     if state.agent_turns == 1:
         if "link" in missing:
-            return "Can you send the verification link again? It is not opening on my phone."
+            return _pick_non_repeating(
+                [
+                    "Can you send the verification link again? It is not opening on my phone.",
+                    "Please resend the link once more. It failed to load for me.",
+                ],
+                last_reply,
+            )
         if "upi" in missing:
-            return "My UPI app is not showing any request. What UPI ID should I use?"
+            return _pick_non_repeating(
+                [
+                    "My UPI app is not showing any request. What UPI ID should I use?",
+                    "I can pay now. Please share your exact UPI handle again.",
+                ],
+                last_reply,
+            )
         return "Could you repeat the exact steps once? I do not want to make a mistake."
 
     if state.agent_turns == 2:
         if "phone" in missing:
-            return "Is there a number I can call back? My connection keeps dropping."
+            return _pick_non_repeating(
+                [
+                    "Is there a number I can call back? My connection keeps dropping.",
+                    "Please share a callback number. The line keeps disconnecting.",
+                ],
+                last_reply,
+            )
         if "account" in missing:
-            return "Before I proceed, can you confirm the account number or IFSC for verification?"
+            return _pick_non_repeating(
+                [
+                    "Before I proceed, can you confirm the account number or IFSC for verification?",
+                    "Share the account number or IFSC once so I can complete this safely.",
+                ],
+                last_reply,
+            )
         return "I am about to proceed, but I am at work. Please resend the details."
 
     fallback_pool = [
@@ -612,13 +641,32 @@ def generate_rule_based_reply(state: SessionState) -> str:
     ]
 
     if "upi" in missing:
-        return "I am ready now. Please send the UPI ID and the exact amount again."
+        return _pick_non_repeating(
+            [
+                "I am ready now. Please send the UPI ID and the exact amount again.",
+                "Please confirm the UPI ID once more with the amount so I can transfer now.",
+                "I can do it now. Share the UPI handle and amount one last time.",
+            ],
+            last_reply,
+        )
     if "link" in missing:
-        return "I still cannot open the link. Please send it again or the official site."
+        return _pick_non_repeating(
+            [
+                "I still cannot open the link. Please send it again or the official site.",
+                "The link still fails for me. Please resend it carefully.",
+            ],
+            last_reply,
+        )
     if "phone" in missing:
-        return "Can you share a callback number? I do not want to miss any update."
+        return _pick_non_repeating(
+            [
+                "Can you share a callback number? I do not want to miss any update.",
+                "Please send a direct number so I can call immediately.",
+            ],
+            last_reply,
+        )
 
-    return random.choice(fallback_pool)
+    return _pick_non_repeating(fallback_pool, last_reply)
 
 
 def generate_agent_reply(state: SessionState, metadata: Optional[Metadata]) -> Tuple[str, str]:
