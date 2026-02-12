@@ -1,76 +1,98 @@
 ﻿# Agentic Honey-Pot API
 
-This project exposes a REST API that detects scam intent, engages scammers with a human-like agent, extracts intelligence, and sends the final result to the GUVI evaluation callback.
+This project provides an API-first scam honeypot with:
+- scam intent detection
+- multi-persona autonomous engagement
+- intelligence extraction
+- mandatory GUVI final callback
+- protected live operator dashboard
 
-**Endpoints**
-- `GET /health` -> service status
-- `POST /api/message` -> process a message event and return the agent reply
+## Endpoints
 
-## Quick Start
+### Core evaluator endpoints
+- `GET /health`
+- `POST /api/message`
+- `POST /` (alias of `/api/message`)
+
+### Dashboard endpoints
+- `GET /dashboard`
+- `GET /dashboard/api/summary`
+- `GET /dashboard/api/sessions?limit=50`
+- `GET /dashboard/api/sessions/{session_id}`
+- `GET /dashboard/api/map`
+
+Dashboard API endpoints require header `x-dashboard-key`.
+
+## Environment Variables
+
+### Required
+- `HONEY_POT_API_KEY` or `API_KEY`
+- `HONEY_POT_DASHBOARD_KEY` (for dashboard APIs)
+
+### LLM (recommended)
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL` (default: `gpt-4o-mini`)
+- `GEMINI_API_KEY`
+- `GEMINI_MODEL` (default: `gemini-1.5-flash`)
+
+### Optional
+- `AGENT_MAX_HISTORY_MESSAGES` (default: `12`)
+- `HONEY_POT_CALLBACK_URL` (default GUVI callback URL)
+- `HONEY_POT_EXTENDED_RESPONSE` (`true` to include extra debug fields in `/api/message` response)
+
+## Local Run
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-$env:HONEY_POT_API_KEY = "your-secret-key"
+
+$env:API_KEY = "your-api-key"
+$env:HONEY_POT_DASHBOARD_KEY = "your-dashboard-key"
+$env:OPENAI_API_KEY = "your-openai-key"
+$env:GEMINI_API_KEY = "your-gemini-key"
+
 python main.py
 ```
 
-## Request Format
+## Local Smoke Test
 
-```json
-{
-  "sessionId": "wertyu-dfghj-ertyui",
-  "message": {
-    "sender": "scammer",
-    "text": "Your bank account will be blocked today. Verify immediately.",
-    "timestamp": 1770005528731
-  },
-  "conversationHistory": [],
-  "metadata": {
-    "channel": "SMS",
-    "language": "English",
-    "locale": "IN"
+```powershell
+$headers = @{
+  "x-api-key" = "your-api-key"
+  "Content-Type" = "application/json"
+}
+
+$body = @{
+  sessionId = "demo-session-1"
+  message = @{
+    sender = "scammer"
+    text = "Your bank account will be blocked today. Verify immediately."
+    timestamp = 1770005528731
   }
-}
+  conversationHistory = @()
+  metadata = @{
+    channel = "SMS"
+    language = "English"
+    locale = "IN"
+  }
+} | ConvertTo-Json -Depth 6
+
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8000/api/message" -Headers $headers -Body $body
 ```
 
-## Required Headers
+Dashboard URL:
+- `http://127.0.0.1:8000/dashboard`
 
-- `x-api-key`: your API key (matches `HONEY_POT_API_KEY` or `API_KEY`)
-- `Content-Type`: `application/json`
+## Tests
 
-## Response Example
-
-```json
-{
-  "status": "success",
-  "reply": "Can you send the verification link again? It is not opening on my phone.",
-  "scamDetected": true,
-  "engagementComplete": false,
-  "intelligence": {
-    "bankAccounts": [],
-    "upiIds": [],
-    "phishingLinks": [],
-    "phoneNumbers": [],
-    "suspiciousKeywords": ["account", "blocked", "verify"]
-  },
-  "totalMessagesExchanged": 2
-}
+```powershell
+python -m unittest discover -s tests -p "test_*.py"
 ```
-
-## Callback Behavior
-
-When scam intent is confirmed and engagement is complete, the service automatically sends the final result to:
-
-```
-POST https://hackathon.guvi.in/api/updateHoneyPotFinalResult
-```
-
-Override the callback URL with `HONEY_POT_CALLBACK_URL` if needed.
 
 ## Notes
 
-- The agent never reveals scam detection and avoids illegal instructions.
-- Intelligence extraction collects UPI IDs, phone numbers, links, and account-like patterns.
-- Session state is stored in-memory by `sessionId`.
+- Reply generation failover order: OpenAI -> Gemini -> rule-based fallback.
+- Session and metrics are in-memory by design for hackathon speed.
+- API response contract remains minimal by default: `{"status":"success","reply":"..."}`.
+- Final callback payload remains evaluator-compatible.

@@ -33,3 +33,5 @@ htmlcov/
 # Build artifacts
 build/
 dist/
+
+tests/

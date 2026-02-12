@@ -1,32 +1,49 @@
-﻿import os
+﻿import hashlib
+import logging
+import os
+import random
 import re
 import time
-import random
-import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Union, Literal
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import requests
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from dotenv import load_dotenv
+load_dotenv()
+
 APP_NAME = "Agentic Honey-Pot"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(APP_DIR, "static")
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
 
 API_KEY = os.getenv("HONEY_POT_API_KEY") or os.getenv("API_KEY") or "dev-key"
-EXTENDED_RESPONSE = str(os.getenv("HONEY_POT_EXTENDED_RESPONSE", "")).lower() in (
-    "1",
-    "true",
-    "yes",
-)
+DASHBOARD_KEY = os.getenv("HONEY_POT_DASHBOARD_KEY") or ""
+EXTENDED_RESPONSE = _env_bool("HONEY_POT_EXTENDED_RESPONSE", False)
 CALLBACK_ENDPOINT = os.getenv(
     "HONEY_POT_CALLBACK_URL",
     "https://hackathon.guvi.in/api/updateHoneyPotFinalResult",
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or ""
+OPENAI_MODEL = os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or ""
+GEMINI_MODEL = os.getenv("GEMINI_MODEL") or "gemini-1.5-flash"
+AGENT_MAX_HISTORY_MESSAGES = int(os.getenv("AGENT_MAX_HISTORY_MESSAGES") or "12")
+LLM_TIMEOUT_SECONDS = int(os.getenv("LLM_TIMEOUT_SECONDS") or "10")
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(APP_NAME)
 
 KEYWORD_WEIGHTS = {
@@ -64,9 +81,9 @@ KEYWORD_WEIGHTS = {
 }
 
 URL_PATTERN = re.compile(r"(https?://\S+|www\.\S+)", re.IGNORECASE)
-UPI_URL_PARAM = re.compile(r'(?i)[?&]pa=([a-z0-9.\-_]+@[a-z0-9]+)')
+UPI_URL_PARAM = re.compile(r"(?i)[?&]pa=([a-z0-9.\-_]+@[a-z0-9]+)")
 UPI_PATTERN = re.compile(
-    r'(?i)\b[a-z0-9.\-_]{2,}@(?:upi|ybl|ibl|okaxis|oksbi|okicici|paytm|phonepe|axl|apl)\b'
+    r"(?i)\b[a-z0-9.\-_]{2,}@(upi|ybl|ibl|okaxis|oksbi|okicici|paytm|phonepe|axl|apl)\b"
 )
 PHONE_PATTERN = re.compile(r"\b(?:\+?\d{1,3}[\s-]?)?(?:\d{10})\b")
 BANK_PATTERN = re.compile(r"\b\d{9,18}\b")
@@ -75,6 +92,61 @@ OTP_PATTERN = re.compile(r"\b(?:otp|one\s*time\s*password|verification\s*code)\b
 
 SUSPECT_THRESHOLD = 4
 STRONG_THRESHOLD = 7
+
+COUNTRY_PREFIXES = {
+    "91": ("IN", "India"),
+    "1": ("US", "United States"),
+    "44": ("GB", "United Kingdom"),
+    "61": ("AU", "Australia"),
+    "65": ("SG", "Singapore"),
+    "880": ("BD", "Bangladesh"),
+    "92": ("PK", "Pakistan"),
+    "94": ("LK", "Sri Lanka"),
+    "971": ("AE", "United Arab Emirates"),
+}
+
+
+@dataclass(frozen=True)
+class Persona:
+    id: str
+    display_name: str
+    age_profile: str
+    style_rules: str
+    goal_bias: str
+
+
+PERSONAS: List[Persona] = [
+    Persona(
+        id="retired_teacher",
+        display_name="Arthur D'Souza",
+        age_profile="65-year-old retired teacher",
+        style_rules=(
+            "Write short, polite messages. Sound slightly confused with technology and ask for"
+            " repeated instructions."
+        ),
+        goal_bias="Prioritize asking for UPI ID and official helpline reference.",
+    ),
+    Persona(
+        id="busy_shop_owner",
+        display_name="Meena Traders",
+        age_profile="42-year-old small shop owner",
+        style_rules=(
+            "Be practical and rushed. Mention customers and ask the scammer to quickly resend"
+            " exact payment details."
+        ),
+        goal_bias="Prioritize collecting payment account details and callback number.",
+    ),
+    Persona(
+        id="supportive_parent",
+        display_name="Ravi Nair",
+        age_profile="51-year-old parent handling family banking",
+        style_rules=(
+            "Stay cooperative but cautious. Ask for confirmation links, official contacts, and"
+            " reference IDs."
+        ),
+        goal_bias="Prioritize phishing links and phone numbers before payment details.",
+    ),
+]
 
 app = FastAPI(title=APP_NAME)
 
@@ -98,6 +170,66 @@ class MessageEvent(BaseModel):
     metadata: Optional[Metadata] = None
 
 
+class DashboardIntelCounts(BaseModel):
+    bankAccounts: int
+    upiIds: int
+    phishingLinks: int
+    phoneNumbers: int
+
+
+class DashboardSummary(BaseModel):
+    activeEngagements: int
+    totalSessions: int
+    finalizedSessions: int
+    totalScammerTimeWastedSeconds: int
+    totalExtracted: DashboardIntelCounts
+
+
+class DashboardSessionCard(BaseModel):
+    sessionId: str
+    persona: str
+    scamDetected: bool
+    engagementComplete: bool
+    messageCount: int
+    lastUpdated: int
+    intelCounts: DashboardIntelCounts
+
+
+class DashboardTranscriptEntry(BaseModel):
+    sender: str
+    text: str
+    timestamp: Union[int, str]
+    provider: Optional[str] = None
+
+
+class DashboardSessionDetail(BaseModel):
+    sessionId: str
+    personaId: str
+    persona: str
+    scamDetected: bool
+    engagementComplete: bool
+    replyProvider: str
+    callbackSent: bool
+    totalMessages: int
+    timeWastedSeconds: int
+    extractedIntelligence: Dict[str, List[str]]
+    transcript: List[DashboardTranscriptEntry]
+
+
+class DashboardMapPoint(BaseModel):
+    countryCode: str
+    countryName: str
+    count: int
+
+
+@dataclass
+class TranscriptMessage:
+    sender: str
+    text: str
+    timestamp: Union[int, str]
+    provider: Optional[str] = None
+
+
 @dataclass
 class Intelligence:
     bank_accounts: set = field(default_factory=set)
@@ -107,17 +239,7 @@ class Intelligence:
     suspicious_keywords: set = field(default_factory=set)
 
     def has_actionable(self) -> bool:
-        return any(
-            [
-                self.bank_accounts,
-                self.upi_ids,
-                self.phishing_links,
-                self.phone_numbers,
-            ]
-        )
-
-    def has_any(self) -> bool:
-        return self.has_actionable() or bool(self.suspicious_keywords)
+        return any([self.bank_accounts, self.upi_ids, self.phishing_links, self.phone_numbers])
 
     def to_payload(self) -> Dict[str, List[str]]:
         return {
@@ -132,24 +254,41 @@ class Intelligence:
 @dataclass
 class SessionState:
     session_id: str
+    persona_id: str
+    persona_label: str
     scam_detected: bool = False
     agent_turns: int = 0
     last_score: int = 0
     scammer_messages: int = 0
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    first_scam_timestamp: Optional[float] = None
+    finalized_timestamp: Optional[float] = None
+    transcript: List[TranscriptMessage] = field(default_factory=list)
     intel: Intelligence = field(default_factory=Intelligence)
     agent_notes: str = ""
     finalized: bool = False
     callback_sent: bool = False
+    reply_provider: str = "rules"
 
 
 SESSION_STORE: Dict[str, SessionState] = {}
 
 
+if os.path.isdir(STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
 def _require_api_key(x_api_key: Optional[str]) -> None:
     if not x_api_key or x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+def _require_dashboard_key(x_dashboard_key: Optional[str]) -> None:
+    if not DASHBOARD_KEY:
+        raise HTTPException(status_code=503, detail="Dashboard key is not configured")
+    if not x_dashboard_key or x_dashboard_key != DASHBOARD_KEY:
+        raise HTTPException(status_code=401, detail="Invalid dashboard key")
 
 
 def _normalize_phone(raw: str) -> str:
@@ -158,7 +297,7 @@ def _normalize_phone(raw: str) -> str:
         return "+" + digits
     if len(digits) == 10:
         return "+91" + digits
-    if len(digits) > 0 and not digits.startswith("+"):
+    if digits:
         return "+" + digits
     return raw
 
@@ -168,6 +307,56 @@ def _collect_texts(message: Message, history: List[Message]) -> List[str]:
     if message.text and message.sender == "scammer":
         texts.append(message.text)
     return texts
+
+
+def assign_persona(session_id: str) -> Persona:
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    index = int(digest[:8], 16) % len(PERSONAS)
+    return PERSONAS[index]
+
+
+def ensure_session_state(session_id: str) -> SessionState:
+    state = SESSION_STORE.get(session_id)
+    if state:
+        return state
+
+    persona = assign_persona(session_id)
+    state = SessionState(
+        session_id=session_id,
+        persona_id=persona.id,
+        persona_label=f"{persona.display_name} ({persona.age_profile})",
+    )
+    SESSION_STORE[session_id] = state
+    return state
+
+
+def _append_transcript(
+    state: SessionState,
+    sender: str,
+    text: str,
+    timestamp: Optional[Union[int, str]] = None,
+    provider: Optional[str] = None,
+) -> None:
+    if not text:
+        return
+    entry = TranscriptMessage(
+        sender=sender,
+        text=text,
+        timestamp=timestamp if timestamp is not None else int(time.time() * 1000),
+        provider=provider,
+    )
+    if state.transcript:
+        last = state.transcript[-1]
+        if last.sender == entry.sender and last.text == entry.text and str(last.timestamp) == str(entry.timestamp):
+            return
+    state.transcript.append(entry)
+
+
+def _seed_history_if_needed(state: SessionState, history: List[Message]) -> None:
+    if state.transcript:
+        return
+    for msg in history:
+        _append_transcript(state, msg.sender, msg.text, msg.timestamp)
 
 
 def detect_scam(texts: List[str]) -> Dict[str, Union[bool, int, List[str]]]:
@@ -185,7 +374,7 @@ def detect_scam(texts: List[str]) -> Dict[str, Union[bool, int, List[str]]]:
         score += 3
         triggers.append("link")
 
-    if UPI_PATTERN.search(combined):
+    if UPI_PATTERN.search(combined) or UPI_URL_PARAM.search(combined):
         score += 4
         triggers.append("upi")
 
@@ -205,31 +394,40 @@ def detect_scam(texts: List[str]) -> Dict[str, Union[bool, int, List[str]]]:
         score += 2
         triggers.append("ifsc")
 
-    scam_detected = score >= SUSPECT_THRESHOLD
-    return {"scamDetected": scam_detected, "score": score, "triggers": triggers}
+    return {"scamDetected": score >= SUSPECT_THRESHOLD, "score": score, "triggers": triggers}
 
 
 def extract_intelligence(texts: List[str], intel: Intelligence) -> None:
     combined = " ".join(texts)
 
     for match in URL_PATTERN.findall(combined):
-        cleaned = match.rstrip("),.;")
-        intel.phishing_links.add(cleaned)
+        intel.phishing_links.add(match.rstrip("),.;"))
 
-    # Extract UPI IDs from URL parameters (e.g., ?pa=merchant@ybl)
     for match in UPI_URL_PARAM.findall(combined):
         intel.upi_ids.add(match.lower())
 
-    # Extract UPI IDs from plain text (e.g., "pay to user@paytm")
-    for match in UPI_PATTERN.findall(combined):
-        intel.upi_ids.add(match.lower())
+    upi_suffixes = {
+        "upi",
+        "ybl",
+        "ibl",
+        "okaxis",
+        "oksbi",
+        "okicici",
+        "paytm",
+        "phonepe",
+        "axl",
+        "apl",
+    }
+    for match in re.findall(r"(?i)\b[a-z0-9.\-_]{2,}@[a-z0-9]+\b", combined):
+        suffix = match.split("@", 1)[1].lower()
+        if suffix in upi_suffixes:
+            intel.upi_ids.add(match.lower())
 
     for match in PHONE_PATTERN.findall(combined):
         intel.phone_numbers.add(_normalize_phone(match))
 
     for match in BANK_PATTERN.findall(combined):
-        if len(match) >= 9:
-            intel.bank_accounts.add(match)
+        intel.bank_accounts.add(match)
 
     for match in IFSC_PATTERN.findall(combined):
         intel.bank_accounts.add(match)
@@ -240,24 +438,159 @@ def extract_intelligence(texts: List[str], intel: Intelligence) -> None:
             intel.suspicious_keywords.add(keyword)
 
 
-def generate_reply(state: SessionState, message: Message, metadata: Optional[Metadata]) -> str:
-    locale = (metadata.locale if metadata else None) or ""
-    channel = (metadata.channel if metadata else None) or ""
-
+def _missing_intel_targets(intel: Intelligence) -> List[str]:
     missing = []
-    if not state.intel.upi_ids:
+    if not intel.upi_ids:
         missing.append("upi")
-    if not state.intel.phishing_links:
+    if not intel.phishing_links:
         missing.append("link")
-    if not state.intel.phone_numbers:
+    if not intel.phone_numbers:
         missing.append("phone")
-    if not state.intel.bank_accounts:
+    if not intel.bank_accounts:
         missing.append("account")
+    return missing
+
+
+def build_tactical_hint(missing_targets: List[str]) -> str:
+    if "upi" in missing_targets:
+        return "Ask naturally for their UPI handle and payment instruction details."
+    if "link" in missing_targets:
+        return "Ask for the exact verification link again and claim it did not open."
+    if "phone" in missing_targets:
+        return "Ask for a callback number and official contact for confirmation."
+    if "account" in missing_targets:
+        return "Ask for account number or IFSC in order to proceed with payment."
+    return "Keep them engaged with short clarifying questions and avoid ending the conversation."
+
+
+def _system_prompt(persona: Persona, metadata: Optional[Metadata], tactical_hint: str) -> str:
+    channel = metadata.channel if metadata and metadata.channel else "Unknown"
+    locale = metadata.locale if metadata and metadata.locale else "Unknown"
+    language = metadata.language if metadata and metadata.language else "English"
+
+    return (
+        "You are role-playing as a potential scam victim. Stay believable, concise, and human. "
+        "Do not disclose that you are an AI, bot, or honeypot. Do not provide illegal or harmful instructions. "
+        "Do not insult or harass. Keep reply under 35 words unless clarification is needed. "
+        f"Persona: {persona.display_name}, {persona.age_profile}. "
+        f"Style: {persona.style_rules} "
+        f"Goal bias: {persona.goal_bias} "
+        f"Context channel={channel}, locale={locale}, language={language}. "
+        f"Internal tactic: {tactical_hint}"
+    )
+
+
+def _build_llm_messages(
+    state: SessionState,
+    metadata: Optional[Metadata],
+    missing_targets: List[str],
+) -> List[Dict[str, str]]:
+    persona = next((p for p in PERSONAS if p.id == state.persona_id), PERSONAS[0])
+    messages: List[Dict[str, str]] = [
+        {
+            "role": "system",
+            "content": _system_prompt(persona, metadata, build_tactical_hint(missing_targets)),
+        }
+    ]
+
+    for msg in state.transcript[-AGENT_MAX_HISTORY_MESSAGES:]:
+        role = "user" if msg.sender == "scammer" else "assistant"
+        messages.append({"role": role, "content": msg.text})
+
+    return messages
+
+
+def _sanitize_reply(text: Optional[str]) -> str:
+    if not text:
+        return ""
+    cleaned = " ".join(text.replace("\n", " ").strip().split())
+    lower = cleaned.lower()
+    blocked_markers = ["as an ai", "language model", "honeypot", "bot"]
+    if any(marker in lower for marker in blocked_markers):
+        return ""
+    return cleaned[:240]
+
+
+def generate_with_openai(messages: List[Dict[str, str]]) -> Optional[str]:
+    if not OPENAI_API_KEY:
+        return None
+
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": OPENAI_MODEL,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 120,
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=LLM_TIMEOUT_SECONDS)
+        if response.status_code >= 400:
+            logger.warning("OpenAI reply failed: status=%s body=%s", response.status_code, response.text[:200])
+            return None
+        data = response.json()
+        content = data["choices"][0]["message"]["content"]
+        return _sanitize_reply(content)
+    except Exception as exc:
+        logger.warning("OpenAI request failed: %s", exc)
+        return None
+
+
+def generate_with_gemini(messages: List[Dict[str, str]]) -> Optional[str]:
+    if not GEMINI_API_KEY:
+        return None
+
+    system_parts = [m["content"] for m in messages if m["role"] == "system"]
+    dialog = [m for m in messages if m["role"] != "system"]
+
+    contents = []
+    for msg in dialog:
+        role = "user" if msg["role"] == "user" else "model"
+        contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+
+    if not contents:
+        contents.append({"role": "user", "parts": [{"text": "Hello"}]})
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    )
+    payload = {
+        "system_instruction": {"parts": [{"text": "\n".join(system_parts)}]},
+        "contents": contents,
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 120},
+    }
+
+    try:
+        response = requests.post(url, json=payload, timeout=LLM_TIMEOUT_SECONDS)
+        if response.status_code >= 400:
+            logger.warning("Gemini reply failed: status=%s body=%s", response.status_code, response.text[:200])
+            return None
+        data = response.json()
+        candidates = data.get("candidates") or []
+        if not candidates:
+            return None
+        parts = candidates[0].get("content", {}).get("parts", [])
+        if not parts:
+            return None
+        content = parts[0].get("text", "")
+        return _sanitize_reply(content)
+    except Exception as exc:
+        logger.warning("Gemini request failed: %s", exc)
+        return None
+
+
+def generate_rule_based_reply(state: SessionState) -> str:
+    missing = _missing_intel_targets(state.intel)
 
     if state.agent_turns == 0:
         return (
             "Hi, I just saw your message. Which bank is this about? "
-            "Please share the official helpline or reference number so I can verify." 
+            "Please share the official helpline or reference number so I can verify."
         )
 
     if state.agent_turns == 1:
@@ -272,7 +605,7 @@ def generate_reply(state: SessionState, message: Message, metadata: Optional[Met
             return "Is there a number I can call back? My connection keeps dropping."
         if "account" in missing:
             return "Before I proceed, can you confirm the account number or IFSC for verification?"
-        return "I am about to proceed, but I am at work. Please resend the details." 
+        return "I am about to proceed, but I am at work. Please resend the details."
 
     fallback_pool = [
         "Sorry, I am outside right now. Can you resend the details once more?",
@@ -289,6 +622,21 @@ def generate_reply(state: SessionState, message: Message, metadata: Optional[Met
         return "Can you share a callback number? I do not want to miss any update."
 
     return random.choice(fallback_pool)
+
+
+def generate_agent_reply(state: SessionState, metadata: Optional[Metadata]) -> Tuple[str, str]:
+    missing_targets = _missing_intel_targets(state.intel)
+    llm_messages = _build_llm_messages(state, metadata, missing_targets)
+
+    openai_reply = generate_with_openai(llm_messages)
+    if openai_reply:
+        return openai_reply, "openai"
+
+    gemini_reply = generate_with_gemini(llm_messages)
+    if gemini_reply:
+        return gemini_reply, "gemini"
+
+    return generate_rule_based_reply(state), "rules"
 
 
 def build_agent_notes(state: SessionState) -> str:
@@ -318,13 +666,10 @@ def should_finalize(state: SessionState) -> bool:
 
     if state.agent_turns >= 6:
         return True
-
     if state.agent_turns >= 2 and has_actionable:
         return True
-
     if state.agent_turns >= 1 and has_actionable and state.last_score >= STRONG_THRESHOLD:
         return True
-
     return False
 
 
@@ -353,25 +698,188 @@ def compute_total_messages(event: MessageEvent, include_reply: bool = True) -> i
     return total
 
 
+def _session_time_wasted_seconds(state: SessionState, now_ts: float) -> int:
+    if not state.scam_detected:
+        return 0
+    start = state.first_scam_timestamp or state.updated_at
+    end = state.finalized_timestamp or now_ts
+    return max(0, int(end - start))
+
+
+def _intel_counts(intel: Intelligence) -> DashboardIntelCounts:
+    return DashboardIntelCounts(
+        bankAccounts=len(intel.bank_accounts),
+        upiIds=len(intel.upi_ids),
+        phishingLinks=len(intel.phishing_links),
+        phoneNumbers=len(intel.phone_numbers),
+    )
+
+
+def _get_country_from_phone(phone: str) -> Tuple[str, str]:
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) == 10:
+        return COUNTRY_PREFIXES["91"]
+    for prefix in sorted(COUNTRY_PREFIXES.keys(), key=len, reverse=True):
+        if digits.startswith(prefix):
+            return COUNTRY_PREFIXES[prefix]
+    return "UN", "Unknown"
+
+
+def _dashboard_summary() -> DashboardSummary:
+    now_ts = time.time()
+    active = 0
+    finalized = 0
+    total_wasted = 0
+
+    all_bank = set()
+    all_upi = set()
+    all_links = set()
+    all_phones = set()
+
+    for state in SESSION_STORE.values():
+        if state.scam_detected and not state.finalized:
+            active += 1
+        if state.finalized:
+            finalized += 1
+        total_wasted += _session_time_wasted_seconds(state, now_ts)
+
+        all_bank.update(state.intel.bank_accounts)
+        all_upi.update(state.intel.upi_ids)
+        all_links.update(state.intel.phishing_links)
+        all_phones.update(state.intel.phone_numbers)
+
+    return DashboardSummary(
+        activeEngagements=active,
+        totalSessions=len(SESSION_STORE),
+        finalizedSessions=finalized,
+        totalScammerTimeWastedSeconds=total_wasted,
+        totalExtracted=DashboardIntelCounts(
+            bankAccounts=len(all_bank),
+            upiIds=len(all_upi),
+            phishingLinks=len(all_links),
+            phoneNumbers=len(all_phones),
+        ),
+    )
+
+
+def _session_card(state: SessionState) -> DashboardSessionCard:
+    return DashboardSessionCard(
+        sessionId=state.session_id,
+        persona=state.persona_label,
+        scamDetected=state.scam_detected,
+        engagementComplete=state.finalized,
+        messageCount=len(state.transcript),
+        lastUpdated=int(state.updated_at),
+        intelCounts=_intel_counts(state.intel),
+    )
+
+
+def _session_detail(state: SessionState) -> DashboardSessionDetail:
+    now_ts = time.time()
+    return DashboardSessionDetail(
+        sessionId=state.session_id,
+        personaId=state.persona_id,
+        persona=state.persona_label,
+        scamDetected=state.scam_detected,
+        engagementComplete=state.finalized,
+        replyProvider=state.reply_provider,
+        callbackSent=state.callback_sent,
+        totalMessages=len(state.transcript),
+        timeWastedSeconds=_session_time_wasted_seconds(state, now_ts),
+        extractedIntelligence=state.intel.to_payload(),
+        transcript=[
+            DashboardTranscriptEntry(
+                sender=t.sender,
+                text=t.text,
+                timestamp=t.timestamp,
+                provider=t.provider,
+            )
+            for t in state.transcript
+        ],
+    )
+
+
+def _map_points() -> List[DashboardMapPoint]:
+    counts: Dict[str, Dict[str, Union[str, int]]] = {}
+    for state in SESSION_STORE.values():
+        for phone in state.intel.phone_numbers:
+            country_code, country_name = _get_country_from_phone(phone)
+            if country_code not in counts:
+                counts[country_code] = {
+                    "countryCode": country_code,
+                    "countryName": country_name,
+                    "count": 0,
+                }
+            counts[country_code]["count"] = int(counts[country_code]["count"]) + 1
+
+    result = [DashboardMapPoint(**value) for value in counts.values()]
+    result.sort(key=lambda item: item.count, reverse=True)
+    return result
+
+
 @app.get("/health")
-async def healthcheck():
+async def healthcheck() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/dashboard")
+async def dashboard_page() -> FileResponse:
+    file_path = os.path.join(STATIC_DIR, "dashboard.html")
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Dashboard UI not found")
+    return FileResponse(file_path)
+
+
+@app.get("/dashboard/api/summary", response_model=DashboardSummary)
+async def dashboard_summary(x_dashboard_key: Optional[str] = Header(None)) -> DashboardSummary:
+    _require_dashboard_key(x_dashboard_key)
+    return _dashboard_summary()
+
+
+@app.get("/dashboard/api/sessions", response_model=List[DashboardSessionCard])
+async def dashboard_sessions(
+    limit: int = Query(default=50, ge=1, le=200),
+    x_dashboard_key: Optional[str] = Header(None),
+) -> List[DashboardSessionCard]:
+    _require_dashboard_key(x_dashboard_key)
+    sessions = sorted(SESSION_STORE.values(), key=lambda item: item.updated_at, reverse=True)
+    return [_session_card(state) for state in sessions[:limit]]
+
+
+@app.get("/dashboard/api/sessions/{session_id}", response_model=DashboardSessionDetail)
+async def dashboard_session_detail(
+    session_id: str,
+    x_dashboard_key: Optional[str] = Header(None),
+) -> DashboardSessionDetail:
+    _require_dashboard_key(x_dashboard_key)
+    state = SESSION_STORE.get(session_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _session_detail(state)
+
+
+@app.get("/dashboard/api/map", response_model=List[DashboardMapPoint])
+async def dashboard_map(x_dashboard_key: Optional[str] = Header(None)) -> List[DashboardMapPoint]:
+    _require_dashboard_key(x_dashboard_key)
+    return _map_points()
 
 
 @app.post("/api/message")
 async def handle_message(event: MessageEvent, x_api_key: Optional[str] = Header(None)):
     _require_api_key(x_api_key)
 
-    state = SESSION_STORE.get(event.sessionId)
-    if not state:
-        state = SessionState(session_id=event.sessionId)
-        SESSION_STORE[event.sessionId] = state
-
+    state = ensure_session_state(event.sessionId)
     state.updated_at = time.time()
+
+    _seed_history_if_needed(state, event.conversationHistory)
+    _append_transcript(state, event.message.sender, event.message.text, event.message.timestamp)
 
     texts = _collect_texts(event.message, event.conversationHistory)
     detection = detect_scam(texts)
     state.last_score = int(detection["score"])
+
+    if detection["scamDetected"] and not state.scam_detected:
+        state.first_scam_timestamp = time.time()
 
     if detection["scamDetected"]:
         state.scam_detected = True
@@ -381,20 +889,26 @@ async def handle_message(event: MessageEvent, x_api_key: Optional[str] = Header(
 
     extract_intelligence(texts, state.intel)
 
-    agent_active = state.scam_detected
-
-    if agent_active:
-        reply = generate_reply(state, event.message, event.metadata)
+    if state.scam_detected:
+        reply, provider = generate_agent_reply(state, event.metadata)
     else:
-        reply = "Sorry, I am not sure I understand. Can you clarify what this is about?"
+        reply, provider = (
+            "Sorry, I am not sure I understand. Can you clarify what this is about?",
+            "rules",
+        )
 
-    if agent_active:
+    state.reply_provider = provider
+
+    if state.scam_detected:
         state.agent_turns += 1
+
+    _append_transcript(state, "user", reply, provider=provider)
 
     total_messages = compute_total_messages(event, include_reply=True)
 
     if should_finalize(state):
         state.finalized = True
+        state.finalized_timestamp = time.time()
         state.agent_notes = build_agent_notes(state)
         if not state.callback_sent:
             send_final_callback(state, total_messages)
@@ -411,10 +925,13 @@ async def handle_message(event: MessageEvent, x_api_key: Optional[str] = Header(
                 "engagementComplete": state.finalized,
                 "extractedIntelligence": state.intel.to_payload(),
                 "totalMessagesExchanged": total_messages,
+                "persona": state.persona_label,
+                "replyProvider": state.reply_provider,
             }
         )
 
     return response
+
 
 @app.post("/")
 async def root_entry(event: MessageEvent, x_api_key: Optional[str] = Header(None)):

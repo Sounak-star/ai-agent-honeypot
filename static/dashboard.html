@@ -1,0 +1,65 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Honey-Pot Dashboard</title>
+  <link rel="stylesheet" href="/static/dashboard.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Agentic Honey-Pot Dashboard</h1>
+      <p>Live scam engagement telemetry</p>
+    </div>
+    <div class="auth-box">
+      <input id="dashboardKey" type="password" placeholder="x-dashboard-key" />
+      <button id="saveKeyBtn">Apply Key</button>
+    </div>
+  </header>
+
+  <main class="grid">
+    <section class="panel kpi-panel">
+      <h2>Summary</h2>
+      <div class="kpi-grid">
+        <div class="kpi"><span class="label">Active</span><span id="kpiActive" class="value">0</span></div>
+        <div class="kpi"><span class="label">Total Sessions</span><span id="kpiSessions" class="value">0</span></div>
+        <div class="kpi"><span class="label">Finalized</span><span id="kpiFinalized" class="value">0</span></div>
+        <div class="kpi"><span class="label">Time Wasted (s)</span><span id="kpiWasted" class="value">0</span></div>
+      </div>
+      <div class="subgrid">
+        <div class="kpi small"><span class="label">Bank IDs</span><span id="kpiBank" class="value">0</span></div>
+        <div class="kpi small"><span class="label">UPI IDs</span><span id="kpiUpi" class="value">0</span></div>
+        <div class="kpi small"><span class="label">Links</span><span id="kpiLinks" class="value">0</span></div>
+        <div class="kpi small"><span class="label">Phones</span><span id="kpiPhones" class="value">0</span></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Recent Sessions</h2>
+      <ul id="sessionList" class="session-list"></ul>
+    </section>
+
+    <section class="panel">
+      <h2>Session Detail</h2>
+      <div id="sessionMeta" class="meta">Select a session.</div>
+      <h3>Transcript</h3>
+      <div id="transcript" class="transcript"></div>
+      <h3>Extracted Intelligence</h3>
+      <pre id="intel" class="intel"></pre>
+    </section>
+
+    <section class="panel">
+      <h2>Country Threat Map</h2>
+      <table class="map-table">
+        <thead>
+          <tr><th>Country</th><th>Code</th><th>Count</th></tr>
+        </thead>
+        <tbody id="mapTableBody"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>
