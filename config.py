@@ -65,6 +65,7 @@ class Settings:
 
     agent_max_history_messages: int
     llm_timeout_seconds: int
+    enable_llm_behavior_analysis: bool
 
     enable_llm_extraction: bool
     llm_extraction_min_interval_seconds: int
@@ -97,6 +98,7 @@ class Settings:
             gemini_model=os.getenv("GEMINI_MODEL") or "gemini-1.5-flash",
             agent_max_history_messages=_env_int("AGENT_MAX_HISTORY_MESSAGES", 12),
             llm_timeout_seconds=_env_int("LLM_TIMEOUT_SECONDS", 10),
+            enable_llm_behavior_analysis=_env_bool("ENABLE_LLM_BEHAVIOR_ANALYSIS", True),
             enable_llm_extraction=_env_bool("ENABLE_LLM_EXTRACTION", True),
             llm_extraction_min_interval_seconds=_env_int("LLM_EXTRACTION_MIN_INTERVAL_SECONDS", 15),
             session_ttl_seconds=_env_int("SESSION_TTL_SECONDS", 6 * 60 * 60),

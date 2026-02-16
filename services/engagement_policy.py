@@ -1,4 +1,5 @@
 from models.session import SessionState
+import time
 
 
 def should_finalize(state: SessionState) -> bool:
@@ -8,21 +9,31 @@ def should_finalize(state: SessionState) -> bool:
     actionable_categories = state.intel.actionable_category_count()
     has_high_value = state.intel.has_high_value()
     has_payment_id = bool(state.intel.upi_ids or state.intel.crypto_wallets)
+    elapsed_seconds = 0
+    if state.first_scam_timestamp is not None:
+        elapsed_seconds = int(time.time() - state.first_scam_timestamp)
+    total_messages = state.scammer_messages + state.agent_turns
 
     # Hard stop to avoid never-ending sessions.
     if state.agent_turns >= 12:
         return True
 
     # If we captured a direct payment identifier, we can wrap up sooner.
-    if has_payment_id and actionable_categories >= 2 and state.agent_turns >= 5:
+    if (
+        has_payment_id
+        and actionable_categories >= 2
+        and state.agent_turns >= 5
+        and total_messages >= 10
+        and elapsed_seconds >= 60
+    ):
         return True
 
     # Strong extraction signal (but require more depth so we don't close before getting UPI, etc).
-    if actionable_categories >= 3 and state.agent_turns >= 10:
+    if actionable_categories >= 3 and state.agent_turns >= 10 and elapsed_seconds >= 60:
         return True
 
     # Last resort for very chatty scammers.
-    if state.scammer_messages >= 12 and state.agent_turns >= 10:
+    if state.scammer_messages >= 12 and state.agent_turns >= 10 and elapsed_seconds >= 60:
         return True
 
     return False

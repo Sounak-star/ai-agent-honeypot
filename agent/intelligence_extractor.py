@@ -10,7 +10,7 @@ EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
 UPI_URL_PARAM = re.compile(r"(?i)[?&]pa=([a-z0-9.\-_]+@[a-z0-9]+)")
 # Avoid matching email addresses like "name@gmail.com" (would otherwise match "name@gmail").
 UPI_PATTERN = re.compile(r"(?i)\b[a-z0-9.\-_]{2,}@[a-z0-9]{2,}\b(?!\.[a-z]{2,})")
-PHONE_PATTERN = re.compile(r"\b(?:\+?\d{1,3}[\s-]?)?(?:\d{10})\b")
+PHONE_PATTERN = re.compile(r"\+?\d[\d -]{8,14}\d")
 BANK_PATTERN = re.compile(r"\b\d{9,18}\b")
 IFSC_PATTERN = re.compile(r"\b[A-Z]{4}0[0-9A-Z]{6}\b")
 
@@ -44,7 +44,7 @@ def _normalize_phone(raw: str) -> str:
         return "+" + digits
     if len(digits) == 10:
         return "+91" + digits
-    if digits:
+    if 10 <= len(digits) <= 15:
         return "+" + digits
     return raw
 
@@ -85,8 +85,9 @@ def extract_intelligence(texts: Iterable[str], intel: Intelligence) -> None:
     phone_digits = set()
     for match in PHONE_PATTERN.findall(combined):
         normalized = _normalize_phone(match)
-        intel.phone_numbers.add(normalized)
-        phone_digits.add(re.sub(r"\D", "", normalized))
+        if normalized.startswith("+"):
+            intel.phone_numbers.add(normalized)
+            phone_digits.add(re.sub(r"\D", "", normalized))
 
     for match in BANK_PATTERN.findall(combined):
         # Prevent phone numbers from being misclassified as bank accounts.

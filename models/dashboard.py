@@ -29,6 +29,8 @@ class DashboardSessionCard(BaseModel):
     scamDetected: bool
     scamCategory: str
     scamConfidence: float
+    rollingScamScore: float = 0.0
+    strategyState: str = "Neutral"
     engagementComplete: bool
     replyProvider: str = "rules"
     messageCount: int
@@ -50,6 +52,8 @@ class DashboardSessionDetail(BaseModel):
     scamDetected: bool
     scamCategory: str
     scamConfidence: float
+    rollingScamScore: float
+    strategyState: str
     scamTriggers: List[str]
     engagementComplete: bool
     replyProvider: str
@@ -59,6 +63,7 @@ class DashboardSessionDetail(BaseModel):
     callbackLastError: Optional[str]
     totalMessages: int
     timeWastedSeconds: int
+    finalOutput: Dict[str, object]
     extractedIntelligence: Dict[str, List[str]]
     extendedIntelligence: Dict[str, List[str]]
     transcript: List[DashboardTranscriptEntry]

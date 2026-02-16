@@ -2,6 +2,7 @@
 
 This project provides an API-first scam honeypot with:
 - scam intent detection
+- hybrid detection pipeline (rules + optional LLM behavior + rolling session risk)
 - multi-persona autonomous engagement
 - intelligence extraction
 - mandatory GUVI final callback
@@ -38,6 +39,7 @@ Dashboard API endpoints require header `x-dashboard-key`.
 ### Optional
 - `AGENT_MAX_HISTORY_MESSAGES` (default: `12`)
 - `LLM_TIMEOUT_SECONDS` (default: `10`)
+- `ENABLE_LLM_BEHAVIOR_ANALYSIS` (default: `true`)
 - `ENABLE_LLM_EXTRACTION` (default: `true`)
 - `LLM_EXTRACTION_MIN_INTERVAL_SECONDS` (default: `15`)
 - `SESSION_TTL_SECONDS` (default: `21600`)
@@ -101,8 +103,12 @@ python -m unittest discover -s tests -p "test_*.py"
 ## Notes
 
 - Reply generation failover order: OpenAI -> Gemini -> rule-based fallback.
+- Detection is progressive: per-message rule score + optional LLM behavior score + rolling session score.
+- Conversation strategy state machine: `Neutral`, `Suspicious`, `Extraction Mode`, `High Confidence Scam`, `Intelligence Harvest Mode`.
 - Session and metrics are in-memory by design for hackathon speed.
 - API response contract remains minimal by default: `{"status":"success","reply":"..."}`.
+- When `HONEY_POT_EXTENDED_RESPONSE=true`, response includes `finalResult` with:
+  - `status`, `scamDetected`, `scamType`, `extractedIntelligence`, `engagementMetrics`, `agentNotes`
 - Final callback payload remains evaluator-compatible.
 
 ## Render Deployment (Docker)

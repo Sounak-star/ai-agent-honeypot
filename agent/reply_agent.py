@@ -6,6 +6,7 @@ from agent.llm_clients import GeminiClient, OpenAIClient, sanitize_reply
 from agent.personas import PERSONAS, Persona
 from models.api import Metadata
 from models.session import SessionState, TranscriptMessage
+from services.strategy_state import STRATEGY_HARVEST_MODE, STRATEGY_SUSPICIOUS
 
 
 def missing_intel_targets(state: SessionState) -> List[str]:
@@ -44,6 +45,8 @@ def _system_prompt(persona: Persona, metadata: Optional[Metadata], state: Sessio
         "Do not disclose that you are an AI, bot, or honeypot. Do not provide illegal or harmful instructions. "
         "Do not insult or harass. Keep reply under 35 words unless clarification is needed. "
         f"Scam category: {state.scam_category}. "
+        f"Strategy state: {state.strategy_state}. "
+        f"Rolling risk score: {state.rolling_scam_score}. "
         f"Persona: {persona.display_name}, {persona.age_profile}. "
         f"Style: {persona.style_rules} "
         f"Goal bias: {persona.goal_bias} "
@@ -180,6 +183,18 @@ def generate_rule_based_reply(state: SessionState) -> str:
     recent_replies = _recent_agent_replies(state, limit=6)
     seed_base = f"{state.session_id}:{state.agent_turns}"
 
+    if state.strategy_state == STRATEGY_HARVEST_MODE:
+        return _pick_non_repeating(
+            [
+                "I am trying now. Please share callback number, reference ID, and exact payment details in one message.",
+                "Before I proceed, send supervisor name, reference ID, and the exact account or UPI details again.",
+                "Network is unstable. Please resend link, helpline, and payment ID together so I can complete quickly.",
+            ],
+            last_reply,
+            recent_replies=recent_replies,
+            seed_hint=f"{seed_base}:harvest",
+        )
+
     if state.agent_turns == 0:
         return (
             "Hi, I just saw your message. Which bank is this about? "
@@ -281,6 +296,34 @@ def generate_rule_based_reply(state: SessionState) -> str:
     )
 
 
+def generate_probe_reply(state: SessionState) -> str:
+    last_reply = _last_agent_reply(state)
+    recent_replies = _recent_agent_replies(state, limit=6)
+    seed_base = f"{state.session_id}:{state.scammer_messages}:{state.strategy_state}"
+
+    if state.strategy_state == STRATEGY_SUSPICIOUS:
+        return _pick_non_repeating(
+            [
+                "Can you share your official support number and case reference so I can confirm first?",
+                "Please send the official website and complaint ID before I continue.",
+                "I need to verify with my bank first. Can you share your employee ID and helpline?",
+            ],
+            last_reply,
+            recent_replies=recent_replies,
+            seed_hint=f"{seed_base}:suspicious-probe",
+        )
+
+    return _pick_non_repeating(
+        [
+            "Sorry, I am not sure I understand. Can you clarify what this is about?",
+            "Can you explain this once more with your official details?",
+        ],
+        last_reply,
+        recent_replies=recent_replies,
+        seed_hint=f"{seed_base}:neutral-probe",
+    )
+
+
 def generate_agent_reply(
     state: SessionState,
     metadata: Optional[Metadata],
@@ -303,4 +346,3 @@ def generate_agent_reply(
             return reply, "gemini"
 
     return generate_rule_based_reply(state), "rules"
-

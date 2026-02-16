@@ -44,6 +44,26 @@ def _session_time_wasted_seconds(first_scam_timestamp, finalized_timestamp, upda
     return max(0, int(end - start))
 
 
+def _final_output_payload(state, now_ts: float) -> Dict[str, object]:
+    duration = _session_time_wasted_seconds(
+        state.first_scam_timestamp,
+        state.finalized_timestamp,
+        state.updated_at,
+        now_ts,
+    )
+    return {
+        "status": "completed" if state.finalized else "in_progress",
+        "scamDetected": state.scam_detected,
+        "scamType": state.scam_category,
+        "extractedIntelligence": state.intel.to_callback_payload(),
+        "engagementMetrics": {
+            "totalMessagesExchanged": state.final_total_messages_exchanged or len(state.transcript),
+            "engagementDurationSeconds": duration,
+        },
+        "agentNotes": state.agent_notes,
+    }
+
+
 def _intel_counts(intel) -> DashboardIntelCounts:
     return DashboardIntelCounts(
         bankAccounts=len(intel.bank_accounts),
@@ -132,6 +152,8 @@ class DashboardService:
                     scamDetected=state.scam_detected,
                     scamCategory=state.scam_category,
                     scamConfidence=state.scam_confidence,
+                    rollingScamScore=state.rolling_scam_score,
+                    strategyState=state.strategy_state,
                     engagementComplete=state.finalized,
                     replyProvider=state.reply_provider,
                     messageCount=len(state.transcript),
@@ -154,6 +176,8 @@ class DashboardService:
             scamDetected=state.scam_detected,
             scamCategory=state.scam_category,
             scamConfidence=state.scam_confidence,
+            rollingScamScore=state.rolling_scam_score,
+            strategyState=state.strategy_state,
             scamTriggers=state.scam_triggers,
             engagementComplete=state.finalized,
             replyProvider=state.reply_provider,
@@ -168,6 +192,7 @@ class DashboardService:
                 state.updated_at,
                 now_ts,
             ),
+            finalOutput=_final_output_payload(state, now_ts),
             extractedIntelligence=state.intel.to_callback_payload(),
             extendedIntelligence=state.intel.to_extended_payload(),
             transcript=[

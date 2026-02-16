@@ -88,6 +88,10 @@ class SessionState:
     scam_confidence: float = 0.0
     scam_category: str = "UNKNOWN"
     scam_triggers: List[str] = field(default_factory=list)
+    rolling_scam_score: float = 0.0
+    last_rule_risk_score: float = 0.0
+    last_behavior_risk_score: float = 0.0
+    strategy_state: str = "Neutral"
 
     agent_turns: int = 0
     scammer_messages: int = 0

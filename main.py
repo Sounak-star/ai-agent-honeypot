@@ -8,14 +8,14 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from agent.behavior_analyzer import BehaviorAnalyzer
 from agent.intelligence_extractor import extract_intelligence
 from agent.llm_clients import GeminiClient, OpenAIClient
 from agent.notes import build_agent_notes
 from agent.personas import assign_persona
 from agent.reply_agent import (
-    build_tactical_hint,
     generate_agent_reply,
-    generate_rule_based_reply,
+    generate_probe_reply,
 )
 from agent.scam_detector import ScamDetector
 from agent.structured_extractor import extract_structured_intelligence, should_run_llm_extraction
@@ -32,6 +32,7 @@ from services.callback_service import CallbackService
 from services.dashboard_service import DashboardService
 from services.engagement_policy import should_finalize
 from services.session_manager import SessionManager
+from services.strategy_state import infer_strategy_state
 
 APP_NAME = "Agentic Honey-Pot"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -57,12 +58,14 @@ LLM_TIMEOUT_SECONDS = settings.llm_timeout_seconds
 
 ENABLE_LLM_EXTRACTION = settings.enable_llm_extraction
 LLM_EXTRACTION_MIN_INTERVAL_SECONDS = settings.llm_extraction_min_interval_seconds
+ENABLE_LLM_BEHAVIOR_ANALYSIS = settings.enable_llm_behavior_analysis
 
 session_manager = SessionManager(
     session_ttl_seconds=settings.session_ttl_seconds,
     cleanup_interval_seconds=settings.session_cleanup_interval_seconds,
 )
 scam_detector = ScamDetector()
+behavior_analyzer = BehaviorAnalyzer()
 dashboard_service = DashboardService(session_manager)
 callback_service = CallbackService(
     callback_url=CALLBACK_ENDPOINT,
@@ -119,6 +122,41 @@ def _collect_scammer_texts(event: MessageEvent) -> List[str]:
 def _compute_total_messages(event: MessageEvent) -> int:
     # history + current + our reply
     return len(event.conversationHistory) + 2
+
+
+def _engagement_duration_seconds(state: SessionState) -> int:
+    if state.first_scam_timestamp is None:
+        return 0
+    end = state.finalized_timestamp or time.time()
+    return max(0, int(end - state.first_scam_timestamp))
+
+
+def _build_final_output(state: SessionState, total_messages: int) -> Dict[str, object]:
+    return {
+        "status": "completed" if state.finalized else "in_progress",
+        "scamDetected": state.scam_detected,
+        "scamType": state.scam_category,
+        "extractedIntelligence": state.intel.to_callback_payload(),
+        "engagementMetrics": {
+            "totalMessagesExchanged": total_messages,
+            "engagementDurationSeconds": _engagement_duration_seconds(state),
+        },
+        "agentNotes": state.agent_notes or build_agent_notes(state),
+    }
+
+
+def _rolling_score(previous: float, rule_score: float, behavior_score: float) -> float:
+    # Progressive session-level scoring: decayed carry + new message contribution.
+    contribution = (0.65 * max(0.0, rule_score)) + (0.35 * max(0.0, behavior_score))
+    return round(min(100.0, (previous * 0.92) + contribution), 2)
+
+
+def _resolve_scam_category(rule_category: str, behavior_hint: Optional[str]) -> str:
+    if behavior_hint and behavior_hint != "GENERIC_SCAM":
+        return behavior_hint
+    if rule_category and rule_category != "GENERIC_SCAM":
+        return rule_category
+    return behavior_hint or rule_category or "GENERIC_SCAM"
 
 
 def _session_factory(session_id: str) -> SessionState:
@@ -189,11 +227,18 @@ async def dashboard_map(x_dashboard_key: Optional[str] = Header(None)) -> List[D
 async def debug_detect_scam(req: DebugTextRequest, x_dashboard_key: Optional[str] = Header(None)):
     _require_dashboard_key(x_dashboard_key)
     result = scam_detector.detect(req.text)
+    behavior = behavior_analyzer.analyze(
+        req.text,
+        _openai_client() if ENABLE_LLM_BEHAVIOR_ANALYSIS else None,
+        _gemini_client() if ENABLE_LLM_BEHAVIOR_ANALYSIS else None,
+    )
     return {
         "isScam": result.is_scam,
         "confidence": result.confidence,
         "category": result.category,
         "score": result.score,
+        "behaviorScore": behavior.score,
+        "behaviorIndicators": behavior.indicators,
         "triggers": result.triggers,
         "suspiciousKeywords": result.suspicious_keywords,
     }
@@ -232,6 +277,8 @@ async def debug_send_callback(session_id: str, x_dashboard_key: Optional[str] = 
 async def handle_message(event: MessageEvent, x_api_key: Optional[str] = Header(None)):
     _require_api_key(x_api_key)
     session_manager.maybe_cleanup()
+    openai_client = _openai_client()
+    gemini_client = _gemini_client()
 
     state = session_manager.get_or_create(event.sessionId, _session_factory)
 
@@ -250,15 +297,53 @@ async def handle_message(event: MessageEvent, x_api_key: Optional[str] = Header(
     session_manager.seed_history_if_needed(state, event.conversationHistory)
     session_manager.append_transcript(state, event.message.sender, event.message.text, event.message.timestamp)
 
+    incoming_scammer_text = event.message.text if event.message.sender == "scammer" else ""
     scammer_texts = _collect_scammer_texts(event)
-    detection = scam_detector.detect(scammer_texts)
+    detection = scam_detector.detect(incoming_scammer_text)
+    behavior = behavior_analyzer.analyze(
+        incoming_scammer_text,
+        openai_client if ENABLE_LLM_BEHAVIOR_ANALYSIS else None,
+        gemini_client if ENABLE_LLM_BEHAVIOR_ANALYSIS else None,
+    )
+
+    rolling_score = _rolling_score(
+        state.rolling_scam_score,
+        detection.score if event.message.sender == "scammer" else 0.0,
+        behavior.score if event.message.sender == "scammer" else 0.0,
+    )
+    scam_detected_now = (
+        detection.is_scam
+        or behavior.score >= 5.0
+        or rolling_score >= 6.0
+    )
+    confidence = round(
+        min(1.0, max(detection.confidence, behavior.confidence, rolling_score / 12.0)),
+        2,
+    )
+    category = _resolve_scam_category(detection.category, behavior.category_hint)
+    merged_triggers = sorted(set(detection.triggers).union(behavior.indicators))
+    merged_keywords = sorted(set(detection.suspicious_keywords).union(behavior.indicators))
+
+    # Include phone/link/account clues from already-collected intel to avoid under-classification.
+    actionable_count = state.intel.actionable_category_count()
+    strategy_state = infer_strategy_state(
+        state,
+        rolling_score=rolling_score,
+        scam_detected=scam_detected_now,
+        actionable_count=actionable_count,
+    )
+
     session_manager.update_detection(
         state,
-        is_scam=detection.is_scam,
-        confidence=detection.confidence,
-        category=detection.category,
-        triggers=detection.triggers,
-        suspicious_keywords=detection.suspicious_keywords,
+        is_scam=scam_detected_now,
+        confidence=confidence,
+        category=category,
+        triggers=merged_triggers,
+        suspicious_keywords=merged_keywords,
+        rolling_score=rolling_score,
+        rule_score=detection.score,
+        behavior_score=behavior.score,
+        strategy_state=strategy_state,
     )
 
     if event.message.sender == "scammer":
@@ -276,8 +361,8 @@ async def handle_message(event: MessageEvent, x_api_key: Optional[str] = Header(
     ):
         callback_payload, extended_payload = extract_structured_intelligence(
             text=event.message.text,
-            openai=_openai_client(),
-            gemini=_gemini_client(),
+            openai=openai_client,
+            gemini=gemini_client,
             timeout_hint_seconds=LLM_TIMEOUT_SECONDS,
         )
         session_manager.update_intel(
@@ -286,19 +371,18 @@ async def handle_message(event: MessageEvent, x_api_key: Optional[str] = Header(
         )
         session_manager.update_llm_extraction_time(state)
 
+    session_manager.set_strategy_state(state, infer_strategy_state(state))
+
     if state.scam_detected:
         reply, provider = generate_agent_reply(
             state,
             event.metadata,
-            _openai_client(),
-            _gemini_client(),
+            openai_client,
+            gemini_client,
             max_history=AGENT_MAX_HISTORY_MESSAGES,
         )
     else:
-        reply, provider = (
-            "Sorry, I am not sure I understand. Can you clarify what this is about?",
-            "rules",
-        )
+        reply, provider = (generate_probe_reply(state), "rules")
 
     session_manager.set_reply_provider(state, provider)
 
@@ -315,17 +399,21 @@ async def handle_message(event: MessageEvent, x_api_key: Optional[str] = Header(
 
     response = {"status": "success", "reply": reply}
     if EXTENDED_RESPONSE:
+        final_result = _build_final_output(state, state.final_total_messages_exchanged or total_messages)
         response.update(
             {
                 "scamDetected": state.scam_detected,
                 "scamCategory": state.scam_category,
                 "scamConfidence": state.scam_confidence,
+                "rollingScamScore": state.rolling_scam_score,
+                "strategyState": state.strategy_state,
                 "engagementComplete": state.finalized,
                 "persona": state.persona_label,
                 "replyProvider": state.reply_provider,
                 "extractedIntelligence": state.intel.to_callback_payload(),
                 "extendedIntelligence": state.intel.to_extended_payload(),
                 "totalMessagesExchanged": total_messages,
+                "finalResult": final_result,
             }
         )
 

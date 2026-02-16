@@ -105,16 +105,24 @@ class SessionManager:
         category: str,
         triggers: List[str],
         suspicious_keywords: List[str],
+        rolling_score: float,
+        rule_score: float,
+        behavior_score: float,
+        strategy_state: str,
     ) -> None:
         with self._lock:
             if is_scam and not state.scam_detected:
                 state.first_scam_timestamp = time.time()
             if is_scam:
                 state.scam_detected = True
-            state.scam_confidence = confidence
-            state.scam_category = category
-            state.scam_triggers = triggers
+            state.scam_confidence = max(state.scam_confidence, confidence)
+            state.scam_category = category if category and category != "UNKNOWN" else state.scam_category
+            state.scam_triggers = sorted(set(state.scam_triggers).union(triggers))
             state.intel.suspicious_keywords.update(suspicious_keywords)
+            state.rolling_scam_score = round(max(state.rolling_scam_score, rolling_score), 2)
+            state.last_rule_risk_score = round(rule_score, 2)
+            state.last_behavior_risk_score = round(behavior_score, 2)
+            state.strategy_state = strategy_state
             state.updated_at = time.time()
 
     def increment_scammer_message(self, state: SessionState) -> None:
@@ -130,6 +138,11 @@ class SessionManager:
     def set_reply_provider(self, state: SessionState, provider: str) -> None:
         with self._lock:
             state.reply_provider = provider
+            state.updated_at = time.time()
+
+    def set_strategy_state(self, state: SessionState, strategy_state: str) -> None:
+        with self._lock:
+            state.strategy_state = strategy_state
             state.updated_at = time.time()
 
     def mark_finalized(self, state: SessionState) -> None:
