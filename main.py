@@ -16,6 +16,7 @@ from agent.personas import assign_persona
 from agent.reply_agent import (
     generate_agent_reply,
     generate_probe_reply,
+    generate_rule_based_reply,
 )
 from agent.scam_detector import ScamDetector
 from agent.structured_extractor import extract_structured_intelligence, should_run_llm_extraction
@@ -31,6 +32,7 @@ from models.session import Intelligence, SessionState, TranscriptMessage
 from services.callback_service import CallbackService
 from services.dashboard_service import DashboardService
 from services.engagement_policy import should_finalize
+from services.llm_load_control import LLMCallGate
 from services.session_manager import SessionManager
 from services.strategy_state import infer_strategy_state
 
@@ -59,6 +61,7 @@ LLM_TIMEOUT_SECONDS = settings.llm_timeout_seconds
 ENABLE_LLM_EXTRACTION = settings.enable_llm_extraction
 LLM_EXTRACTION_MIN_INTERVAL_SECONDS = settings.llm_extraction_min_interval_seconds
 ENABLE_LLM_BEHAVIOR_ANALYSIS = settings.enable_llm_behavior_analysis
+HIGH_LOAD_MODE = settings.high_load_mode
 
 session_manager = SessionManager(
     session_ttl_seconds=settings.session_ttl_seconds,
@@ -76,6 +79,14 @@ callback_service = CallbackService(
     enable_updates=settings.enable_callback_updates,
     max_updates=settings.callback_max_updates,
     session_manager=session_manager,
+)
+llm_call_gate = LLMCallGate(
+    enabled=HIGH_LOAD_MODE,
+    global_rpm_limit=settings.llm_global_rpm_limit,
+    reply_rpm_limit=settings.llm_reply_rpm_limit,
+    behavior_rpm_limit=settings.llm_behavior_rpm_limit,
+    extraction_rpm_limit=settings.llm_extraction_rpm_limit,
+    behavior_sample_every_n_scam_messages=settings.llm_behavior_sample_every_n_scam_messages,
 )
 
 app = FastAPI(title=APP_NAME)
@@ -255,6 +266,12 @@ async def debug_extract_intelligence(req: DebugTextRequest, x_dashboard_key: Opt
     }
 
 
+@app.get("/dashboard/api/debug/llm-gate")
+async def debug_llm_gate(x_dashboard_key: Optional[str] = Header(None)):
+    _require_dashboard_key(x_dashboard_key)
+    return llm_call_gate.snapshot().to_dict()
+
+
 @app.delete("/dashboard/api/debug/sessions")
 async def debug_clear_sessions(x_dashboard_key: Optional[str] = Header(None)):
     _require_dashboard_key(x_dashboard_key)
@@ -298,12 +315,18 @@ async def handle_message(event: MessageEvent, x_api_key: Optional[str] = Header(
     session_manager.append_transcript(state, event.message.sender, event.message.text, event.message.timestamp)
 
     incoming_scammer_text = event.message.text if event.message.sender == "scammer" else ""
+    incoming_scammer_index = state.scammer_messages + (1 if event.message.sender == "scammer" else 0)
     scammer_texts = _collect_scammer_texts(event)
     detection = scam_detector.detect(incoming_scammer_text)
+    allow_behavior_llm = (
+        ENABLE_LLM_BEHAVIOR_ANALYSIS
+        and event.message.sender == "scammer"
+        and llm_call_gate.allow("behavior", scammer_message_index=incoming_scammer_index)
+    )
     behavior = behavior_analyzer.analyze(
         incoming_scammer_text,
-        openai_client if ENABLE_LLM_BEHAVIOR_ANALYSIS else None,
-        gemini_client if ENABLE_LLM_BEHAVIOR_ANALYSIS else None,
+        openai_client if allow_behavior_llm else None,
+        gemini_client if allow_behavior_llm else None,
     )
 
     rolling_score = _rolling_score(
@@ -358,6 +381,7 @@ async def handle_message(event: MessageEvent, x_api_key: Optional[str] = Header(
         and state.scam_detected
         and event.message.sender == "scammer"
         and should_run_llm_extraction(state.last_llm_extraction_at, LLM_EXTRACTION_MIN_INTERVAL_SECONDS)
+        and llm_call_gate.allow("extraction", scammer_message_index=incoming_scammer_index)
     ):
         callback_payload, extended_payload = extract_structured_intelligence(
             text=event.message.text,
@@ -373,7 +397,12 @@ async def handle_message(event: MessageEvent, x_api_key: Optional[str] = Header(
 
     session_manager.set_strategy_state(state, infer_strategy_state(state))
 
-    if state.scam_detected:
+    allow_reply_llm = state.scam_detected and llm_call_gate.allow(
+        "reply",
+        scammer_message_index=incoming_scammer_index,
+    )
+
+    if state.scam_detected and allow_reply_llm:
         reply, provider = generate_agent_reply(
             state,
             event.metadata,
@@ -381,6 +410,8 @@ async def handle_message(event: MessageEvent, x_api_key: Optional[str] = Header(
             gemini_client,
             max_history=AGENT_MAX_HISTORY_MESSAGES,
         )
+    elif state.scam_detected:
+        reply, provider = (generate_rule_based_reply(state), "rules")
     else:
         reply, provider = (generate_probe_reply(state), "rules")
 
@@ -414,6 +445,7 @@ async def handle_message(event: MessageEvent, x_api_key: Optional[str] = Header(
                 "extendedIntelligence": state.intel.to_extended_payload(),
                 "totalMessagesExchanged": total_messages,
                 "finalResult": final_result,
+                "llmLoadGate": llm_call_gate.snapshot().to_dict(),
             }
         )
 

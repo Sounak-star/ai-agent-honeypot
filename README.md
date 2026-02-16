@@ -21,6 +21,7 @@ This project provides an API-first scam honeypot with:
 - `GET /dashboard/api/sessions?limit=50`
 - `GET /dashboard/api/sessions/{session_id}`
 - `GET /dashboard/api/map`
+- `GET /dashboard/api/debug/llm-gate`
 
 Dashboard API endpoints require header `x-dashboard-key`.
 
@@ -40,6 +41,12 @@ Dashboard API endpoints require header `x-dashboard-key`.
 - `AGENT_MAX_HISTORY_MESSAGES` (default: `12`)
 - `LLM_TIMEOUT_SECONDS` (default: `10`)
 - `ENABLE_LLM_BEHAVIOR_ANALYSIS` (default: `true`)
+- `HIGH_LOAD_MODE` (default: `false`)
+- `LLM_GLOBAL_RPM_LIMIT` (default: `26`)
+- `LLM_REPLY_RPM_LIMIT` (default: `18`)
+- `LLM_BEHAVIOR_RPM_LIMIT` (default: `8`)
+- `LLM_EXTRACTION_RPM_LIMIT` (default: `6`)
+- `LLM_BEHAVIOR_SAMPLE_EVERY_N_SCAM_MESSAGES` (default: `2`)
 - `ENABLE_LLM_EXTRACTION` (default: `true`)
 - `LLM_EXTRACTION_MIN_INTERVAL_SECONDS` (default: `15`)
 - `SESSION_TTL_SECONDS` (default: `21600`)
@@ -105,6 +112,7 @@ python -m unittest discover -s tests -p "test_*.py"
 - Reply generation failover order: OpenAI -> Gemini -> rule-based fallback.
 - Detection is progressive: per-message rule score + optional LLM behavior score + rolling session score.
 - Conversation strategy state machine: `Neutral`, `Suspicious`, `Extraction Mode`, `High Confidence Scam`, `Intelligence Harvest Mode`.
+- High-load mode can rate-limit LLM calls and degrade to rule-based behavior while keeping API responses stable.
 - Session and metrics are in-memory by design for hackathon speed.
 - API response contract remains minimal by default: `{"status":"success","reply":"..."}`.
 - When `HONEY_POT_EXTENDED_RESPONSE=true`, response includes `finalResult` with:

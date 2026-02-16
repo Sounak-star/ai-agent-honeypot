@@ -66,6 +66,12 @@ class Settings:
     agent_max_history_messages: int
     llm_timeout_seconds: int
     enable_llm_behavior_analysis: bool
+    high_load_mode: bool
+    llm_global_rpm_limit: int
+    llm_reply_rpm_limit: int
+    llm_behavior_rpm_limit: int
+    llm_extraction_rpm_limit: int
+    llm_behavior_sample_every_n_scam_messages: int
 
     enable_llm_extraction: bool
     llm_extraction_min_interval_seconds: int
@@ -99,6 +105,15 @@ class Settings:
             agent_max_history_messages=_env_int("AGENT_MAX_HISTORY_MESSAGES", 12),
             llm_timeout_seconds=_env_int("LLM_TIMEOUT_SECONDS", 10),
             enable_llm_behavior_analysis=_env_bool("ENABLE_LLM_BEHAVIOR_ANALYSIS", True),
+            high_load_mode=_env_bool("HIGH_LOAD_MODE", False),
+            llm_global_rpm_limit=_env_int("LLM_GLOBAL_RPM_LIMIT", 26),
+            llm_reply_rpm_limit=_env_int("LLM_REPLY_RPM_LIMIT", 18),
+            llm_behavior_rpm_limit=_env_int("LLM_BEHAVIOR_RPM_LIMIT", 8),
+            llm_extraction_rpm_limit=_env_int("LLM_EXTRACTION_RPM_LIMIT", 6),
+            llm_behavior_sample_every_n_scam_messages=_env_int(
+                "LLM_BEHAVIOR_SAMPLE_EVERY_N_SCAM_MESSAGES",
+                2,
+            ),
             enable_llm_extraction=_env_bool("ENABLE_LLM_EXTRACTION", True),
             llm_extraction_min_interval_seconds=_env_int("LLM_EXTRACTION_MIN_INTERVAL_SECONDS", 15),
             session_ttl_seconds=_env_int("SESSION_TTL_SECONDS", 6 * 60 * 60),
