@@ -40,7 +40,9 @@ def _session_time_wasted_seconds(first_scam_timestamp, finalized_timestamp, upda
     if first_scam_timestamp is None:
         return 0
     start = first_scam_timestamp or updated_at
-    end = finalized_timestamp or now_ts
+    # For non-finalized sessions, use last activity time instead of wall clock time.
+    # This prevents "time wasted" from increasing while no messages are exchanged.
+    end = finalized_timestamp or updated_at
     return max(0, int(end - start))
 
 
