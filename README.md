@@ -49,6 +49,7 @@ Dashboard API endpoints require header `x-dashboard-key`.
 - `LLM_BEHAVIOR_SAMPLE_EVERY_N_SCAM_MESSAGES` (default: `2`)
 - `ENABLE_LLM_EXTRACTION` (default: `true`)
 - `LLM_EXTRACTION_MIN_INTERVAL_SECONDS` (default: `15`)
+- `INACTIVITY_FINALIZE_SECONDS` (default: `120`, set `0` to disable inactivity auto-finalize)
 - `SESSION_TTL_SECONDS` (default: `21600`)
 - `SESSION_CLEANUP_INTERVAL_SECONDS` (default: `60`)
 - `HONEY_POT_CALLBACK_URL` (default GUVI callback URL)
@@ -113,6 +114,7 @@ python -m unittest discover -s tests -p "test_*.py"
 - Detection is progressive: per-message rule score + optional LLM behavior score + rolling session score.
 - Conversation strategy state machine: `Neutral`, `Suspicious`, `Extraction Mode`, `High Confidence Scam`, `Intelligence Harvest Mode`.
 - High-load mode can rate-limit LLM calls and degrade to rule-based behavior while keeping API responses stable.
+- Inactivity auto-finalize closes stale scam sessions and sends callback when no new messages arrive for configured seconds.
 - Session and metrics are in-memory by design for hackathon speed.
 - API response contract remains minimal by default: `{"status":"success","reply":"..."}`.
 - When `HONEY_POT_EXTENDED_RESPONSE=true`, response includes `finalResult` with:

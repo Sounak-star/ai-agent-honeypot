@@ -62,6 +62,7 @@ ENABLE_LLM_EXTRACTION = settings.enable_llm_extraction
 LLM_EXTRACTION_MIN_INTERVAL_SECONDS = settings.llm_extraction_min_interval_seconds
 ENABLE_LLM_BEHAVIOR_ANALYSIS = settings.enable_llm_behavior_analysis
 HIGH_LOAD_MODE = settings.high_load_mode
+INACTIVITY_FINALIZE_SECONDS = max(0, settings.inactivity_finalize_seconds)
 
 session_manager = SessionManager(
     session_ttl_seconds=settings.session_ttl_seconds,
@@ -179,6 +180,36 @@ def _session_factory(session_id: str) -> SessionState:
     )
 
 
+def _auto_finalize_inactive_sessions(skip_session_id: Optional[str] = None) -> int:
+    if INACTIVITY_FINALIZE_SECONDS <= 0:
+        return 0
+
+    now = time.time()
+    finalized_count = 0
+    for stale in session_manager.list_sessions():
+        if skip_session_id and stale.session_id == skip_session_id:
+            continue
+        if stale.finalized or stale.closed:
+            continue
+        if not stale.scam_detected:
+            continue
+        if stale.agent_turns < 1:
+            continue
+        if (now - stale.updated_at) < INACTIVITY_FINALIZE_SECONDS:
+            continue
+
+        total_messages = stale.final_total_messages_exchanged or len(stale.transcript)
+        session_manager.finalize_and_close(
+            stale,
+            build_agent_notes(stale),
+            total_messages=total_messages,
+        )
+        callback_service.send_async(stale, total_messages=total_messages)
+        finalized_count += 1
+
+    return finalized_count
+
+
 def _closed_reply(state: SessionState) -> str:
     if state.persona_id == "busy_shop_owner":
         return "I will go to the bank branch now. I cannot message more right now."
@@ -203,6 +234,7 @@ async def dashboard_page() -> FileResponse:
 @app.get("/dashboard/api/summary", response_model=DashboardSummary)
 async def dashboard_summary(x_dashboard_key: Optional[str] = Header(None)) -> DashboardSummary:
     _require_dashboard_key(x_dashboard_key)
+    _auto_finalize_inactive_sessions()
     return dashboard_service.summary()
 
 
@@ -212,6 +244,7 @@ async def dashboard_sessions(
     x_dashboard_key: Optional[str] = Header(None),
 ) -> List[DashboardSessionCard]:
     _require_dashboard_key(x_dashboard_key)
+    _auto_finalize_inactive_sessions()
     return dashboard_service.list_sessions(limit=limit)
 
 
@@ -221,6 +254,7 @@ async def dashboard_session_detail(
     x_dashboard_key: Optional[str] = Header(None),
 ) -> DashboardSessionDetail:
     _require_dashboard_key(x_dashboard_key)
+    _auto_finalize_inactive_sessions()
     try:
         return dashboard_service.session_detail(session_id=session_id)
     except KeyError:
@@ -230,6 +264,7 @@ async def dashboard_session_detail(
 @app.get("/dashboard/api/map", response_model=List[DashboardMapPoint])
 async def dashboard_map(x_dashboard_key: Optional[str] = Header(None)) -> List[DashboardMapPoint]:
     _require_dashboard_key(x_dashboard_key)
+    _auto_finalize_inactive_sessions()
     return dashboard_service.map_points()
 
 
@@ -294,6 +329,7 @@ async def debug_send_callback(session_id: str, x_dashboard_key: Optional[str] = 
 async def handle_message(event: MessageEvent, x_api_key: Optional[str] = Header(None)):
     _require_api_key(x_api_key)
     session_manager.maybe_cleanup()
+    _auto_finalize_inactive_sessions(skip_session_id=event.sessionId)
     openai_client = _openai_client()
     gemini_client = _gemini_client()
 

@@ -75,6 +75,7 @@ class Settings:
 
     enable_llm_extraction: bool
     llm_extraction_min_interval_seconds: int
+    inactivity_finalize_seconds: int
 
     session_ttl_seconds: int
     session_cleanup_interval_seconds: int
@@ -116,6 +117,7 @@ class Settings:
             ),
             enable_llm_extraction=_env_bool("ENABLE_LLM_EXTRACTION", True),
             llm_extraction_min_interval_seconds=_env_int("LLM_EXTRACTION_MIN_INTERVAL_SECONDS", 15),
+            inactivity_finalize_seconds=_env_int("INACTIVITY_FINALIZE_SECONDS", 120),
             session_ttl_seconds=_env_int("SESSION_TTL_SECONDS", 6 * 60 * 60),
             session_cleanup_interval_seconds=_env_int("SESSION_CLEANUP_INTERVAL_SECONDS", 60),
             callback_timeout_seconds=_env_int("CALLBACK_TIMEOUT_SECONDS", 5),

@@ -1,4 +1,5 @@
 import os
+import time
 import unittest
 
 from fastapi import HTTPException
@@ -139,3 +140,39 @@ class HoneypotTests(unittest.IsolatedAsyncioTestCase):
 
         summary = await main.dashboard_summary(x_dashboard_key="test-dashboard-key")
         self.assertIn("totalSessions", summary.model_dump())
+
+    async def test_inactivity_auto_finalize(self):
+        callback_calls = []
+        main.callback_service.send_async = lambda *args, **kwargs: callback_calls.append((args, kwargs))
+
+        stale_state = SessionState(
+            session_id="stale-session",
+            persona_id="retired_teacher",
+            persona_label="Arthur (65-year-old retired teacher)",
+        )
+        stale_state.scam_detected = True
+        stale_state.agent_turns = 2
+        stale_state.scammer_messages = 2
+        stale_state.first_scam_timestamp = time.time() - 200
+        stale_state.updated_at = time.time() - (main.INACTIVITY_FINALIZE_SECONDS + 5)
+        stale_state.transcript.extend(
+            [
+                TranscriptMessage(sender="scammer", text="Share OTP now.", timestamp=1),
+                TranscriptMessage(sender="user", text="Please explain once more.", timestamp=2, provider="rules"),
+            ]
+        )
+        main.session_manager.get_or_create("stale-session", lambda _sid: stale_state)
+
+        trigger_event = MessageEvent(
+            sessionId="trigger-session",
+            message=Message(sender="scammer", text="Hello there.", timestamp=3),
+            conversationHistory=[],
+            metadata=Metadata(channel="SMS", language="English", locale="IN"),
+        )
+        await main.handle_message(trigger_event, x_api_key="test-api-key")
+
+        updated = main.session_manager.get("stale-session")
+        self.assertIsNotNone(updated)
+        self.assertTrue(updated.finalized)
+        self.assertTrue(updated.closed)
+        self.assertGreaterEqual(len(callback_calls), 1)
