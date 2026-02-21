@@ -117,7 +117,7 @@ python -m unittest discover -s tests -p "test_*.py"
 - Conversation strategy state machine: `Neutral`, `Suspicious`, `Extraction Mode`, `High Confidence Scam`, `Intelligence Harvest Mode`.
 - High-load mode can rate-limit LLM calls and degrade to rule-based behavior while keeping API responses stable.
 - Inactivity auto-finalize closes stale scam sessions and sends callback when no new messages arrive for configured seconds.
-- Session and metrics are in-memory by design for hackathon speed.
+- Session and metrics are in-memory by design for speed.
 - API response contract remains minimal by default: `{"status":"success","reply":"..."}`.
 - When `HONEY_POT_EXTENDED_RESPONSE=true`, response includes `finalResult` with:
   - `sessionId`, `status`, `scamDetected`, `scamType`, `confidenceLevel`, `extractedIntelligence`, `totalMessagesExchanged`, `engagementDurationSeconds`, `engagementMetrics`, `agentNotes`
